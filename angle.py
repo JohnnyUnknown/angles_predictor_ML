@@ -3,18 +3,15 @@ import numpy as np
 from pathlib import Path
 import pandas as pd
 from joblib import dump, load
-from sklearn.ensemble import RandomForestRegressor, StackingRegressor
-from sklearn.multioutput import MultiOutputRegressor
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split, cross_val_score, learning_curve
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import LinearRegression, RANSACRegressor, QuantileRegressor
 from sklearn.metrics import mean_absolute_error, make_scorer
-from sklearn.neural_network import MLPRegressor
 from sys import path
 import optuna
 from xgboost import XGBRegressor
-from catboost import CatBoostRegressor
 from EDA_angles import get_selected_params
-
+from time import perf_counter
 
 
 def bayes_opt(X_train, y_train):
@@ -59,6 +56,7 @@ def angular_error_deg(y_true, y_pred):
     # Нормализуем к [-180, 180)
     errors = (diff + 180) % 360 - 180
     return errors
+
 
 def evaluate_angle_predictions(y_true, y_pred, title="Оценка качества предсказания угла"):
     """
@@ -135,46 +133,37 @@ all_data = pd.read_csv((path_dir / "angles\\combined_data_angle.csv"))
 delta = 1
 
 X, y = get_selected_params(method=None, num_of_params=8, show_img=False, save_img=False)
+print(len(X))
 
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.5, random_state=1)
 test_index = list(y_test.index)
 
 
 # # Оптимизация гиперпараметров моделей
 # bayes_opt(X, y)
 
-# for num in range(50, 150, 10):
-#     model = RandomForestRegressor(n_estimators=num)
-#     scores_mae = cross_val_score(model, X, y, cv=5, scoring='neg_mean_absolute_error')
-#     scores_mse = cross_val_score(model, X, y, cv=5, scoring='neg_mean_squared_error')
-#     print(f"{num}: Avg MAE (dx & dy) = {-scores_mae.mean():.4f} ± {scores_mae.std():.4f}")
-#     print(f"{num}: Avg MSE (dx & dy) = {-scores_mse.mean():.4f} ± {scores_mse.std():.4f}")
 
-
-# model = RandomForestRegressor(n_estimators=80, min_samples_split=3, random_state=1)
 model = LinearRegression()
-# model = CatBoostRegressor(iterations=500, depth=6, learning_rate=0.1, loss_function='MAE')
-# model = XGBRegressor(n_estimators=70, random_state=1, eval_metric=mean_absolute_error, n_jobs=-1)
+# model = QuantileRegressor(quantile=0.5, alpha=0.0, solver='highs')
 # model = XGBRegressor(n_estimators=249, max_depth=10, learning_rate=0.037, eval_metric=mean_absolute_error,
 #                       random_state=1, subsample=0.64, colsample_bytree=0.7)
 
 
-# multi_model = load("model_2.joblib")
-
-
-
 print("Значение кросс-валидации модели (MAE):", np.mean(cross_val_score(model, X, y, cv=5,
                                                                   scoring='neg_mean_absolute_error') * -1), "\n")
-# print("Значение кросс-валидации модели (MSE):", np.mean(cross_val_score(model, X, y, cv=5,
-#                                                                   scoring='neg_mean_squared_error') * -1), "\n")
+print("Значение кросс-валидации модели (MSE):", np.mean(cross_val_score(model, X, y, cv=5,
+                                                                  scoring='neg_mean_squared_error') * -1), "\n")
 
 model.fit(X_train, y_train)
-y_pred = model.predict(X_test)
 
+start = perf_counter()
+y_pred = model.predict(X_test)
+finish = perf_counter()
+print("Время инференса модели:", round((finish - start) / X_test.shape[0] * 1000000, 5), "мкр сек.\n")
 
 # # Сохранение модели (обучение на полном наборе данных)
 # model.fit(np.array(X), y)
-# dump(model, 'linear_angles_calculator.joblib')
+# dump(model, 'angles_calc.joblib')
 
 
 evaluate_angle_predictions(y_test, y_pred)

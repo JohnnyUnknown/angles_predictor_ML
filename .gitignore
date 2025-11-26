@@ -1,11 +1,10 @@
 # Default ignored files
 /shelf/
 __pycache__
-old
 angles
-angles_shifts
-angles_2
-angles_5deg
-graphics
+angles2
+angles3
+angles4
+raw2
 *.jpg
 /workspace.xml
