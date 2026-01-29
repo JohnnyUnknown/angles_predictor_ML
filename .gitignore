@@ -3,8 +3,7 @@
 __pycache__
 angles
 angles2
-angles3
-angles4
-raw2
+raw_2
+test.py
 *.jpg
 /workspace.xml

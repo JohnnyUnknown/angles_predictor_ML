@@ -1,24 +1,79 @@
+"""
+Скрипт для обучения и оценки моделей машинного обучения предсказания угла поворота
+между изображениями на основе признаков фазовой корреляции.
+
+ОСНОВНАЯ ЗАДАЧА:
+Построение регрессионной модели, которая по измеренным локальным смещениям (dx, dy)
+в 9 регионах изображения (сетка 3×3) предсказывает угол поворота между парой изображений.
+
+ИСТОЧНИК ДАННЫХ:
+- Обучающий датасет: 'combined_data_angle.csv'
+- Структура признаков: 18 столбцов (9 тайлов × 2 признака: dx, dy)
+- Целевая переменная: 'angle' (угол поворота в градусах, диапазон [-3.0°, +3.0°])
+
+РЕАЛИЗОВАННЫЕ МОДЕЛИ:
+1. Линейная регрессия (базовый бенчмарк)
+2. Ridge-регрессия (линейная регрессия с L2-регуляризацией)
+3. Random Forest (ансамбль деревьев решений)
+4. XGBoost (градиентный бустинг с оптимизацией гиперпараметров через Optuna)
+
+ОСОБЕННОСТИ ОЦЕНКИ:
+- Использование угловой ошибки с учётом цикличности (для общего случая)
+- Визуализация качества предсказания через 3 графика:
+  * Истинный vs Предсказанный угол (диагностическая диаграмма рассеяния)
+  * Распределение ошибок (гистограмма)
+  * Зависимость ошибки от величины истинного угла
+- Метрики качества: MAE, RMSE, 95-й перцентиль ошибки
+"""
+
 import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
 import pandas as pd
 from joblib import dump, load
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split, cross_val_score, learning_curve
-from sklearn.linear_model import LinearRegression, RANSACRegressor, QuantileRegressor
-from sklearn.metrics import mean_absolute_error, make_scorer
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.linear_model import LinearRegression, RANSACRegressor, Ridge
+from sklearn.metrics import mean_absolute_error
 from sys import path
 import optuna
 from xgboost import XGBRegressor
-from EDA_angles import get_selected_params
 from time import perf_counter
+import seaborn as sns
+
+
+def analysis():
+    """
+    Проводит разведочный анализ данных (EDA) для понимания структуры датасета.
+      1. Вывод статистических характеристик (среднее, СКО, мин/макс) для всех признаков
+      2. Проверку на пропущенные значения (в синтетических данных их быть не должно)
+      3. Построение корреляционной матрицы для выявления зависимостей между признаками
+    """
+    print(round(all_data.describe().transpose(), 2))
+    
+    print(all_data.isnull().sum())
+
+    corr_matrix = all_data.corr()
+    plt.figure(figsize=(15, 10))
+    sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', fmt='.2f')
+    plt.title('Корреляционная матрица')
+    plt.show()
 
 
 def bayes_opt(X_train, y_train):
-    def multioutput_mae(y_true, y_pred):
-        return np.mean(np.abs(y_true - y_pred))
-
-    mae_scorer = make_scorer(multioutput_mae, greater_is_better=False)
+    """
+    Оптимизирует гиперпараметры XGBoost с помощью байесовской оптимизации (Optuna).
+    
+    ПАРАМЕТРЫ ОПТИМИЗАЦИИ:
+      - n_estimators: количество деревьев (40–300)
+      - max_depth: максимальная глубина дерева (3–10)
+      - learning_rate: скорость обучения (логарифмическая шкала 0.01–0.3)
+      - subsample: доля объектов для обучения каждого дерева (0.6–1.0)
+      - colsample_bytree: доля признаков для обучения каждого дерева (0.6–1.0)
+    
+    ВОЗВРАЩАЕТ:
+      Словарь с оптимальными гиперпараметрами для инициализации XGBRegressor
+    """
     def objective(trial):
         params = {
             "n_estimators": trial.suggest_int("n_estimators", 40, 300),
@@ -26,23 +81,22 @@ def bayes_opt(X_train, y_train):
             "max_depth": trial.suggest_int("max_depth", 3, 10),
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
             "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
-            "random_state": 42,
-            "n_jobs": -1,
-            "verbosity": 0,
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0)
         }
         
         model = XGBRegressor(**params)
-        scores = -cross_val_score(model, X_train, y_train, cv=3, scoring=mae_scorer, n_jobs=-1)
+        scores = -cross_val_score(model, X_train, y_train, cv=3, scoring='neg_mean_absolute_error', n_jobs=-1)
         return scores.mean()
 
     print("\nЗапуск Optuna...")
     study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=30)
+    study.optimize(objective, n_trials=30, show_progress_bar=True)
 
-    print("Лучшие параметры (Optuna):")
+    print("\nЛучшие параметры (Optuna):")
     print(study.best_params)
     print(f"Лучший MAE: {study.best_value:.3f} px")
+
+    return study.best_params
 
 
 def angular_error_deg(y_true, y_pred):
@@ -66,6 +120,15 @@ def evaluate_angle_predictions(y_true, y_pred, title="Оценка качест�
         y_true : array-like — истинные углы (градусы)
         y_pred : array-like — предсказанные углы (градусы)
         title : str — заголовок графиков
+    
+    ВОЗВРАЩАЕТ:
+        Словарь с ключевыми метриками качества:
+          - mae: средняя абсолютная ошибка (градусы)
+          - rmse: среднеквадратичная ошибка (градусы)
+          - std_error: стандартное отклонение ошибки
+          - max_error: максимальная абсолютная ошибка
+          - percentile_95: 95-й перцентиль абсолютной ошибки
+          - errors: массив всех ошибок для дальнейшего анализа
     """
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
@@ -126,45 +189,57 @@ def evaluate_angle_predictions(y_true, y_pred, title="Оценка качест�
     }
 
 
-path_dir = Path(path[0])
 
-all_data = pd.read_csv((path_dir / "angles\\combined_data_angle.csv"))
+path_dir = Path(path[0])
+all_data = pd.read_csv((path_dir / "combined_data_angle.csv"))
 
 delta = 1
+# analysis()
 
-X, y = get_selected_params(method=None, num_of_params=8, show_img=False, save_img=False)
-print(len(X))
+# Разделение на признаки (X) и целевую переменную (y)
+# Последний столбец — угол поворота, остальные — признаки измеренных смещений
+y = all_data.loc[:, all_data.columns[-1]]
+X = all_data.loc[:, all_data.columns[:-1]]
 
+
+# Разделение на обучающую и тестовую выборки (50/50 для надёжной оценки на синтетических данных)
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.5, random_state=1)
 test_index = list(y_test.index)
 
 
-# # Оптимизация гиперпараметров моделей
-# bayes_opt(X, y)
-
-
+# Базовая модель: линейная регрессия (быстрая, интерпретируемая, хороший бенчмарк)
 model = LinearRegression()
-# model = QuantileRegressor(quantile=0.5, alpha=0.0, solver='highs')
-# model = XGBRegressor(n_estimators=249, max_depth=10, learning_rate=0.037, eval_metric=mean_absolute_error,
-#                       random_state=1, subsample=0.64, colsample_bytree=0.7)
+
+# Альтернативные модели (раскомментировать для использования):
+# model = Ridge(alpha=1)  # Линейная регрессия с L2-регуляризацией (борьба с мультиколлинеарностью)
+# model = RandomForestRegressor(n_estimators=100, criterion='squared_error')  # Ансамбль деревьев (нелинейные зависимости, устойчивость к выбросам)
+# model = XGBRegressor(n_estimators=249, max_depth=10, learning_rate=0.037, 
+#                      eval_metric='mae', random_state=1, subsample=0.64, colsample_bytree=0.7)
+# model = XGBRegressor(**bayes_opt(X, y))  # XGBoost с оптимизированными гиперпараметрами
 
 
+# Кросс-валидация на полном датасете (5 фолдов) для объективной оценки обобщающей способности
 print("Значение кросс-валидации модели (MAE):", np.mean(cross_val_score(model, X, y, cv=5,
                                                                   scoring='neg_mean_absolute_error') * -1), "\n")
 print("Значение кросс-валидации модели (MSE):", np.mean(cross_val_score(model, X, y, cv=5,
                                                                   scoring='neg_mean_squared_error') * -1), "\n")
 
+# Обучение модели на обучающей выборке
 model.fit(X_train, y_train)
 
+
+# Измерение времени инференса (предсказания) для одного изображения
+# Важно для оценки производительности в реальном времени
 start = perf_counter()
 y_pred = model.predict(X_test)
 finish = perf_counter()
-print("Время инференса модели:", round((finish - start) / X_test.shape[0] * 1000000, 5), "мкр сек.\n")
+print("Время инференса модели:", round((finish - start) / X_test.shape[0] * 1000000, 5), "*10-6 сек.\n")
 
-# # Сохранение модели (обучение на полном наборе данных)
-# model.fit(np.array(X), y)
+
+# # Сохранение обученной модели для последующего использования (раскомментировать при необходимости)
+# model.fit(np.array(X), y)  # Обучение на полном датасете перед сохранением
 # dump(model, 'angles_calc.joblib')
 
 
+# Полная оценка качества предсказания угла с детальной статистикой и графиками
 evaluate_angle_predictions(y_test, y_pred)
-
